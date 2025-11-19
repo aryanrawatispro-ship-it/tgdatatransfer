@@ -6,6 +6,7 @@
   "destination_channel": "@destination_channel_username",
   "delay_between_files": 2,
   "preserve_captions": true,
+  "copy_text_messages": true,
   "download_path": "./temp_downloads",
   "max_file_size_mb": 2000,
   "file_types": ["photo", "video", "document", "audio"]

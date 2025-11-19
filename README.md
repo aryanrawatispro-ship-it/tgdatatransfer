@@ -1,10 +1,12 @@
 # Telegram Channel Media Transfer Tool
 
-A Python-based automation tool for transferring media files from one Telegram channel to another with minimal storage footprint. Perfect for VPS environments with limited disk space.
+A Python-based automation tool for transferring content from one Telegram channel to another with minimal storage footprint. Perfect for VPS environments with limited disk space.
 
 ## Features
 
+- **Complete channel cloning** - Copy both media files AND text messages
 - **One-file-at-a-time processing** - Minimizes disk usage by downloading, uploading, and deleting each file sequentially
+- **Text message copying** - Optional text-only message transfer (no download needed)
 - **Progress tracking** - Saves progress to resume if interrupted
 - **Interactive setup** - CLI prompts for easy configuration
 - **Error handling** - Gracefully handles failures and continues processing
@@ -76,9 +78,13 @@ Edit `config.json` with your settings:
   "destination_channel": "@destination_channel_username",
   "delay_between_files": 2,
   "preserve_captions": true,
+  "copy_text_messages": true,
   "download_path": "./temp_downloads"
 }
 ```
+
+**Configuration Options:**
+- `copy_text_messages` - Set to `true` to copy text-only messages, `false` to copy only media (default: `true`)
 
 ## Usage
 

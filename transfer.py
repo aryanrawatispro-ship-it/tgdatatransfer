@@ -94,6 +94,9 @@ class Config:
         preserve = input("Preserve original captions? (yes/no) [default: yes]: ").strip().lower()
         preserve_captions = preserve != 'no'
 
+        copy_text = input("Copy text messages too? (yes/no) [default: yes]: ").strip().lower()
+        copy_text_messages = copy_text != 'no'
+
         download_path = input("Download path [default: ./temp_downloads]: ").strip()
         download_path = download_path if download_path else "./temp_downloads"
 
@@ -105,6 +108,7 @@ class Config:
             "destination_channel": destination_channel,
             "delay_between_files": delay,
             "preserve_captions": preserve_captions,
+            "copy_text_messages": copy_text_messages,
             "download_path": download_path,
             "max_file_size_mb": 2000,
             "file_types": ["photo", "video", "document", "audio"]
@@ -152,6 +156,7 @@ class ProgressTracker:
             "last_message_id": 0,
             "processed_count": 0,
             "processed_ids": [],  # Track actual processed message IDs
+            "text_messages_copied": 0,  # Track text-only messages
             "failed_ids": [],
             "skipped_ids": [],
             "total_size_mb": 0,
@@ -186,6 +191,15 @@ class ProgressTracker:
             self.data["skipped_ids"].append(message_id)
         self.save()
 
+    def mark_text_copied(self, message_id: int):
+        """Mark a text message as copied."""
+        if message_id not in self.data.get("processed_ids", []):
+            self.data.setdefault("processed_ids", []).append(message_id)
+            self.data.setdefault("text_messages_copied", 0)
+            self.data["text_messages_copied"] += 1
+        self.data["last_message_id"] = max(self.data["last_message_id"], message_id)
+        self.save()
+
     def is_processed(self, message_id: int) -> bool:
         """Check if message was already processed."""
         # Check in processed_ids list (more accurate) or skipped_ids
@@ -196,6 +210,7 @@ class ProgressTracker:
         """Get current statistics."""
         return {
             "processed": self.data["processed_count"],
+            "text_copied": self.data.get("text_messages_copied", 0),
             "failed": len(self.data["failed_ids"]),
             "skipped": len(self.data["skipped_ids"]),
             "total_size_mb": round(self.data["total_size_mb"], 2)
@@ -422,6 +437,36 @@ class TelegramTransfer:
         except Exception as e:
             print(f"  ⚠ Could not delete file: {e}")
 
+    async def copy_text_message(self, message: Message, dest_entity, retry_count: int = 0) -> bool:
+        """Copy text-only message to destination channel."""
+        max_retries = 3
+
+        try:
+            print(f"  📝 Copying text message...")
+
+            # Send message text to destination
+            await self.client.send_message(
+                dest_entity,
+                message.message
+            )
+
+            print(f"  ✓ Text copied successfully")
+            return True
+
+        except FloodWaitError as e:
+            if retry_count >= max_retries:
+                print(f"  ✗ Max retries reached for rate limiting")
+                return False
+
+            wait_time = min(e.seconds, 300)  # Cap wait at 5 minutes
+            print(f"  ⚠ Rate limit hit. Waiting {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+            return await self.copy_text_message(message, dest_entity, retry_count + 1)
+
+        except Exception as e:
+            print(f"  ✗ Text copy error: {e}")
+            return False
+
     async def transfer_all(self):
         """Main transfer loop."""
         # Clean up any orphaned files from previous interrupted runs
@@ -443,10 +488,12 @@ class TelegramTransfer:
 
         # Check for resume
         stats = self.progress.get_stats()
-        if stats["processed"] > 0:
+        if stats["processed"] > 0 or stats.get("text_copied", 0) > 0:
             print(f"\n⟳ Resuming from previous session")
-            print(f"  Already processed: {stats['processed']} files")
-            print(f"  Failed: {stats['failed']} files")
+            print(f"  Already processed: {stats['processed']} media files")
+            if stats.get("text_copied", 0) > 0:
+                print(f"  Text messages copied: {stats['text_copied']}")
+            print(f"  Failed: {stats['failed']} messages")
             print(f"  Total transferred: {stats['total_size_mb']} MB")
 
         print("\n" + "="*60)
@@ -462,12 +509,30 @@ class TelegramTransfer:
             if self.progress.is_processed(message.id):
                 continue
 
-            # Skip non-media messages
+            # Handle text-only messages
             if not message.media:
-                self.progress.mark_skipped(message.id)
+                # Check if we should copy text messages
+                if self.config.get("copy_text_messages", False) and message.message:
+                    print(f"\n[Text Message {message.id}] Copying text...")
+
+                    # Copy text message
+                    copy_success = await self.copy_text_message(message, dest_entity)
+
+                    if copy_success:
+                        self.progress.mark_text_copied(message.id)
+                    else:
+                        self.progress.mark_failed(message.id)
+
+                    # Rate limiting delay
+                    if delay > 0:
+                        print(f"  ⏱ Waiting {delay} seconds...")
+                        await asyncio.sleep(delay)
+                else:
+                    # Skip text messages if not configured to copy
+                    self.progress.mark_skipped(message.id)
                 continue
 
-            # Get file info
+            # Get file info for media messages
             file_info = self.get_file_info(message)
             if not file_info:
                 self.progress.mark_skipped(message.id)
@@ -516,10 +581,12 @@ class TelegramTransfer:
         print("\n" + "="*60)
         print("TRANSFER COMPLETE")
         print("="*60)
-        print(f"\n✓ Total processed: {final_stats['processed']} files")
+        print(f"\n✓ Total media files: {final_stats['processed']}")
         print(f"✓ Total size: {final_stats['total_size_mb']} MB")
-        print(f"⚠ Failed: {final_stats['failed']} files")
-        print(f"⊘ Skipped: {final_stats['skipped']} files")
+        if final_stats.get('text_copied', 0) > 0:
+            print(f"✓ Text messages copied: {final_stats['text_copied']}")
+        print(f"⚠ Failed: {final_stats['failed']} messages")
+        print(f"⊘ Skipped: {final_stats['skipped']} messages")
         print(f"\nProgress saved to: {self.progress.progress_path}")
         print()
 
