@@ -33,7 +33,12 @@ class Config:
                 with open(self.config_path, 'r') as f:
                     config = json.load(f)
                     # Validate required fields
-                    required_fields = ['api_id', 'api_hash', 'phone', 'source_channel', 'destination_channel']
+                    required_fields = ['api_id', 'api_hash', 'source_channel', 'destination_channel']
+                    # Phone is only required if login_method is 'phone' or not specified
+                    login_method = config.get('login_method', 'phone')
+                    if login_method == 'phone' and 'phone' not in config:
+                        print(f"⚠ Config file is missing phone number for phone login. Starting fresh setup.")
+                        return self._interactive_setup()
                     if all(field in config for field in required_fields):
                         return config
                     else:
@@ -62,7 +67,30 @@ class Config:
             print("  ✗ API ID must be a number. Please try again.")
 
         api_hash = input("Enter your API Hash: ").strip()
-        phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
+
+        # Choose login method
+        print("\n" + "-"*60)
+        print("Authentication Method")
+        print("-"*60 + "\n")
+        print("Choose how to log in to Telegram:")
+        print("  1. Phone Number (traditional SMS/call verification)")
+        print("  2. QR Code (scan with Telegram mobile app)\n")
+
+        login_method = "phone"  # default
+        phone = ""
+
+        while True:
+            choice = input("Enter your choice (1 or 2) [default: 1]: ").strip()
+            if not choice or choice == "1":
+                login_method = "phone"
+                phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
+                break
+            elif choice == "2":
+                login_method = "qr"
+                print("✓ QR code login selected. You'll scan a QR code when the script starts.")
+                break
+            else:
+                print("  ✗ Invalid choice. Please enter 1 or 2.")
 
         print("\n" + "-"*60)
         print("Channel Configuration")
@@ -103,7 +131,8 @@ class Config:
         config = {
             "api_id": api_id,
             "api_hash": api_hash,
-            "phone": phone,
+            "login_method": login_method,
+            "phone": phone,  # Empty string if QR code login
             "source_channel": source_channel,
             "destination_channel": destination_channel,
             "delay_between_files": delay,
@@ -241,16 +270,87 @@ class TelegramTransfer:
             self.config.get("api_hash")
         )
 
-        await self.client.start(phone=self.config.get("phone"))
+        await self.client.connect()
 
+        # Check if already authorized
         if await self.client.is_user_authorized():
             me = await self.client.get_me()
-            print(f"✓ Authenticated as: {me.first_name} ({me.phone})")
-        else:
-            print("✗ Authentication failed")
-            return False
+            print(f"✓ Already authenticated as: {me.first_name} ({me.phone})")
+            return True
 
-        return True
+        # Authenticate based on login method
+        login_method = self.config.get("login_method", "phone")
+
+        if login_method == "qr":
+            print("QR Code Login Selected")
+            print("-" * 60)
+            print("\nGenerating QR code for login...")
+            print("Open Telegram on your mobile device and scan the QR code:\n")
+
+            try:
+                # Use QR code login
+                qr_login = await self.client.qr_login()
+
+                # Display QR code
+                print("  Scan this QR code with your Telegram mobile app:")
+                print("  (Settings > Devices > Link Desktop Device)\n")
+
+                # Generate a simple text-based QR code representation
+                try:
+                    # Try to display as link
+                    import qrcode
+                    qr = qrcode.QRCode(version=1, box_size=1, border=1)
+                    qr.add_data(qr_login.url)
+                    qr.make(fit=True)
+                    qr.print_ascii(invert=True)
+                except ImportError:
+                    # Fallback: just show the URL
+                    print(f"  QR Code URL: {qr_login.url}\n")
+                    print("  You can:")
+                    print("  1. Scan the URL above with a QR code app, then open in Telegram")
+                    print("  2. Visit https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + qr_login.url)
+                    print("     and scan the QR code displayed\n")
+
+                print("\n  Waiting for you to scan the QR code...")
+
+                # Wait for login
+                await qr_login.wait()
+
+                # Verify authorization
+                if await self.client.is_user_authorized():
+                    me = await self.client.get_me()
+                    print(f"\n✓ Successfully authenticated as: {me.first_name}")
+                    return True
+                else:
+                    print("\n✗ QR code authentication failed")
+                    return False
+
+            except Exception as e:
+                print(f"\n✗ QR code login error: {e}")
+                print("  Try using phone number login instead.")
+                return False
+
+        else:
+            # Traditional phone number login
+            phone = self.config.get("phone")
+            if not phone:
+                print("✗ Phone number not configured")
+                return False
+
+            try:
+                await self.client.start(phone=phone)
+
+                if await self.client.is_user_authorized():
+                    me = await self.client.get_me()
+                    print(f"✓ Authenticated as: {me.first_name} ({me.phone})")
+                    return True
+                else:
+                    print("✗ Authentication failed")
+                    return False
+
+            except Exception as e:
+                print(f"✗ Phone login error: {e}")
+                return False
 
     def sanitize_filename(self, filename: str) -> str:
         """Sanitize filename to prevent path traversal and invalid characters."""
