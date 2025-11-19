@@ -1,0 +1,5 @@
+# Telegram API Library
+telethon>=1.34.0
+
+# Progress bars (optional, for visual progress display)
+tqdm>=4.66.0

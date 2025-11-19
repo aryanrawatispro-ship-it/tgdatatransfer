@@ -1,0 +1,13 @@
+{
+  "api_id": "YOUR_API_ID",
+  "api_hash": "YOUR_API_HASH",
+  "phone": "+1234567890",
+  "source_channel": "@source_channel_username",
+  "destination_channel": "@destination_channel_username",
+  "delay_between_files": 2,
+  "preserve_captions": true,
+  "copy_text_messages": true,
+  "download_path": "./temp_downloads",
+  "max_file_size_mb": 2000,
+  "file_types": ["photo", "video", "document", "audio"]
+}
