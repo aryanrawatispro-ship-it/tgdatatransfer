@@ -1,0 +1,39 @@
+# Configuration files with sensitive data
+config.json
+
+# Session files
+*.session
+*.session-journal
+
+# Progress tracking
+progress.json
+
+# Temporary downloads
+temp_downloads/
+downloads/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

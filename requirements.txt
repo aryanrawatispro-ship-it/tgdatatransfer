@@ -1,0 +1,11 @@
+# Telegram API Library
+telethon>=1.34.0
+
+# Async support
+asyncio>=3.4.3
+
+# Progress bars
+tqdm>=4.66.0
+
+# Configuration handling
+python-dotenv>=1.0.0
