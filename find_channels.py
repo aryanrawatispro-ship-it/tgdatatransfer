@@ -84,7 +84,7 @@ async def main():
     print(f"{'='*80}\n")
 
     if supergroups:
-        for i, gr in enumerate(supergroups[:10], 1):  # Show first 10
+        for i, gr in enumerate(supergroups, 1):  # Show ALL supergroups
             print(f"{i}. {gr['title']}")
             print(f"   Group ID: {gr['id']}")
             if gr['username']:
@@ -93,8 +93,6 @@ async def main():
             else:
                 print(f"   ✓ Use in config: {gr['id']}")
             print()
-        if len(supergroups) > 10:
-            print(f"... and {len(supergroups) - 10} more supergroups\n")
 
     print("\n" + "="*80)
     print("INSTRUCTIONS:")
