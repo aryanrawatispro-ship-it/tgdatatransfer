@@ -8,9 +8,10 @@ Complete step-by-step instructions for setting up the Telegram Channel Media Tra
 2. [Python Solution Setup (Recommended)](#python-solution-setup-recommended)
 3. [Alternative: tdl CLI Setup](#alternative-tdl-cli-setup)
 4. [Getting Telegram API Credentials](#getting-telegram-api-credentials)
-5. [Finding Channel IDs](#finding-channel-ids)
-6. [Running in Background](#running-in-background)
-7. [Troubleshooting](#troubleshooting)
+5. [Authentication Methods](#authentication-methods)
+6. [Finding Channel IDs](#finding-channel-ids)
+7. [Running in Background](#running-in-background)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -80,10 +81,15 @@ python3 transfer.py
 
 The script will:
 1. Prompt you for API credentials
-2. Ask for source and destination channels
-3. Configure settings interactively
-4. Save everything to `config.json`
-5. Start the transfer process
+2. Ask you to choose authentication method (Phone or QR Code)
+3. Ask for source and destination channels
+4. Configure settings interactively
+5. Save everything to `config.json`
+6. Start the transfer process
+
+**Authentication Options:**
+- **Phone Number**: Traditional SMS/call verification (requires receiving codes on VPS)
+- **QR Code**: Scan with Telegram mobile app (easier for VPS, no SMS needed)
 
 ### Step 5: Verify Configuration
 
@@ -98,14 +104,20 @@ Example configuration:
 {
   "api_id": "12345678",
   "api_hash": "abcdef1234567890abcdef1234567890",
+  "login_method": "qr",
   "phone": "+1234567890",
   "source_channel": "@source_channel",
   "destination_channel": "@dest_channel",
   "delay_between_files": 2,
   "preserve_captions": true,
+  "copy_text_messages": true,
   "download_path": "./temp_downloads"
 }
 ```
+
+**Note:** `login_method` can be:
+- `"phone"` - Phone number authentication (requires `phone` field)
+- `"qr"` - QR code authentication (phone field optional)
 
 ---
 
@@ -244,6 +256,49 @@ You'll see:
 - **api_hash**: A long string (e.g., abcdef1234567890...)
 
 **IMPORTANT:** Keep these credentials private! Never share them or commit them to public repositories.
+
+---
+
+## Authentication Methods
+
+The tool supports two ways to authenticate with Telegram:
+
+### Method 1: QR Code Login (Recommended for VPS)
+
+This is the easiest method, especially on VPS where receiving SMS can be problematic.
+
+**How it works:**
+1. When running the script for the first time, choose option `2` (QR Code)
+2. The script will display a QR code in your terminal
+3. Open Telegram on your mobile device
+4. Go to **Settings** → **Devices** → **Link Desktop Device**
+5. Scan the QR code shown in the terminal
+6. Done! No SMS verification needed
+
+**Advantages:**
+- No need to receive SMS on the VPS
+- Faster authentication process
+- Works perfectly on headless servers
+- More secure (phone number not exposed during auth)
+- No need to enter verification codes manually
+
+**Note:** If the QR code doesn't display properly in your terminal (missing `qrcode` library), the script will provide a URL that you can convert to a QR code using any online QR generator.
+
+### Method 2: Phone Number Login (Traditional)
+
+Traditional authentication using phone number and SMS verification.
+
+**How it works:**
+1. When running the script, choose option `1` (Phone Number)
+2. Enter your phone number with country code (e.g., +1234567890)
+3. Telegram will send you a verification code via SMS or call
+4. Enter the code when prompted
+5. If you have 2FA enabled, enter your password
+
+**When to use:**
+- You can easily receive SMS on your server
+- You're running on local machine with phone access
+- You prefer traditional authentication
 
 ---
 
@@ -422,6 +477,38 @@ sudo systemctl stop telegram-transfer
 # Solution: Ensure phone includes country code
 # ✗ Wrong: 1234567890
 # ✓ Correct: +1234567890
+
+# Or switch to QR code login (easier):
+# - Delete config.json to start fresh setup
+# - Choose QR code login option
+rm config.json
+python3 transfer.py
+```
+
+**Problem:** QR code not displaying properly
+```bash
+# Solution 1: Install qrcode library
+pip3 install qrcode
+
+# Solution 2: Use the URL fallback
+# The script will show a URL like: tg://login?token=...
+# Visit: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=<URL>
+# Then scan the generated QR code with Telegram app
+
+# Solution 3: Switch to phone login
+# Edit config.json and change:
+# "login_method": "phone"
+```
+
+**Problem:** QR code login timeout or not working
+```bash
+# Solutions:
+# 1. Make sure you're scanning with the correct Telegram app
+# 2. Try generating a new QR code by restarting the script
+# 3. Check your internet connection on both devices
+# 4. Switch to phone number authentication if QR doesn't work
+rm session.session*
+python3 transfer.py
 ```
 
 **Problem:** "API ID or hash is invalid"

@@ -7,6 +7,7 @@ A Python-based automation tool for transferring content from one Telegram channe
 - **Complete channel cloning** - Copy both media files AND text messages
 - **One-file-at-a-time processing** - Minimizes disk usage by downloading, uploading, and deleting each file sequentially
 - **Text message copying** - Optional text-only message transfer (no download needed)
+- **QR code login** - Easy authentication by scanning QR code with Telegram mobile app
 - **Progress tracking** - Saves progress to resume if interrupted
 - **Interactive setup** - CLI prompts for easy configuration
 - **Error handling** - Gracefully handles failures and continues processing
@@ -84,7 +85,37 @@ Edit `config.json` with your settings:
 ```
 
 **Configuration Options:**
+- `login_method` - Authentication method: `"phone"` for SMS/call verification or `"qr"` for QR code login (default: `"phone"`)
+- `phone` - Your phone number with country code (required for phone login, optional for QR login)
 - `copy_text_messages` - Set to `true` to copy text-only messages, `false` to copy only media (default: `true`)
+
+## Authentication Methods
+
+### QR Code Login (Recommended for VPS)
+
+The easiest way to authenticate, especially on a VPS without SMS access:
+
+1. During interactive setup, choose option `2` for QR code login
+2. A QR code will be displayed in your terminal
+3. Open Telegram on your mobile device
+4. Go to **Settings** → **Devices** → **Link Desktop Device**
+5. Scan the QR code displayed in the terminal
+6. Authentication complete!
+
+**Benefits:**
+- No need to receive SMS on VPS
+- Faster authentication
+- Works on headless servers
+- More secure (no phone number exposure)
+
+### Phone Number Login (Traditional)
+
+Traditional SMS/call verification:
+
+1. During interactive setup, choose option `1` for phone login
+2. Enter your phone number with country code
+3. You'll receive a verification code via SMS or call
+4. Enter the code when prompted
 
 ## Usage
 
@@ -134,6 +165,8 @@ Progress is saved in `progress.json` with:
 - Ensure your phone number includes country code (e.g., +1234567890)
 - Check that api_id and api_hash are correct
 - Delete `session.session` file and re-authenticate if needed
+- For QR code login: If QR doesn't display properly, the script will show a URL you can convert to QR code
+- Try switching between phone and QR login methods if one doesn't work
 
 ### Storage Issues
 - The script processes one file at a time
