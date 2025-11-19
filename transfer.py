@@ -512,7 +512,7 @@ class TelegramTransfer:
             # Handle text-only messages
             if not message.media:
                 # Check if we should copy text messages
-                if self.config.get("copy_text_messages", False) and message.message:
+                if self.config.get("copy_text_messages", True) and message.message:
                     print(f"\n[Text Message {message.id}] Copying text...")
 
                     # Copy text message
