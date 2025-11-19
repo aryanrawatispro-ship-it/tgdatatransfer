@@ -13,10 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeFilename, Message
 from telethon.errors import FloodWaitError, ChannelPrivateError
-from tqdm import tqdm
+import re
 
 
 class Config:
@@ -29,8 +29,19 @@ class Config:
     def _load_or_create_config(self) -> Dict:
         """Load existing config or create new one interactively."""
         if os.path.exists(self.config_path):
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
+            try:
+                with open(self.config_path, 'r') as f:
+                    config = json.load(f)
+                    # Validate required fields
+                    required_fields = ['api_id', 'api_hash', 'phone', 'source_channel', 'destination_channel']
+                    if all(field in config for field in required_fields):
+                        return config
+                    else:
+                        print(f"⚠ Config file is missing required fields. Starting fresh setup.")
+                        return self._interactive_setup()
+            except json.JSONDecodeError:
+                print(f"⚠ Config file is corrupted. Starting fresh setup.")
+                return self._interactive_setup()
         else:
             return self._interactive_setup()
 
@@ -43,7 +54,13 @@ class Config:
         print("First, you need API credentials from https://my.telegram.org")
         print("Go to 'API Development Tools' and create an application.\n")
 
-        api_id = input("Enter your API ID: ").strip()
+        # Validate API ID (must be numeric)
+        while True:
+            api_id = input("Enter your API ID: ").strip()
+            if api_id.isdigit():
+                break
+            print("  ✗ API ID must be a number. Please try again.")
+
         api_hash = input("Enter your API Hash: ").strip()
         phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
 
@@ -60,8 +77,19 @@ class Config:
         print("Optional Settings")
         print("-"*60 + "\n")
 
-        delay = input("Delay between files in seconds [default: 2]: ").strip()
-        delay = int(delay) if delay else 2
+        # Validate delay input
+        while True:
+            delay_input = input("Delay between files in seconds [default: 2]: ").strip()
+            if not delay_input:
+                delay = 2
+                break
+            try:
+                delay = int(delay_input)
+                if delay >= 0:
+                    break
+                print("  ✗ Delay must be a positive number. Please try again.")
+            except ValueError:
+                print("  ✗ Invalid number. Please try again.")
 
         preserve = input("Preserve original captions? (yes/no) [default: yes]: ").strip().lower()
         preserve_captions = preserve != 'no'
@@ -106,11 +134,24 @@ class ProgressTracker:
     def _load_progress(self) -> Dict:
         """Load existing progress or create new."""
         if os.path.exists(self.progress_path):
-            with open(self.progress_path, 'r') as f:
-                return json.load(f)
+            try:
+                with open(self.progress_path, 'r') as f:
+                    data = json.load(f)
+                    # Ensure processed_ids exists for backward compatibility
+                    if "processed_ids" not in data:
+                        data["processed_ids"] = []
+                    return data
+            except json.JSONDecodeError:
+                print(f"⚠ Progress file is corrupted. Starting fresh.")
+                # Backup corrupted file
+                backup_path = f"{self.progress_path}.backup"
+                os.rename(self.progress_path, backup_path)
+                print(f"  Old progress backed up to: {backup_path}")
+
         return {
             "last_message_id": 0,
             "processed_count": 0,
+            "processed_ids": [],  # Track actual processed message IDs
             "failed_ids": [],
             "skipped_ids": [],
             "total_size_mb": 0,
@@ -126,8 +167,10 @@ class ProgressTracker:
 
     def mark_processed(self, message_id: int, file_size_mb: float = 0):
         """Mark a message as successfully processed."""
-        self.data["last_message_id"] = message_id
-        self.data["processed_count"] += 1
+        if message_id not in self.data.get("processed_ids", []):
+            self.data.setdefault("processed_ids", []).append(message_id)
+            self.data["processed_count"] += 1
+        self.data["last_message_id"] = max(self.data["last_message_id"], message_id)
         self.data["total_size_mb"] += file_size_mb
         self.save()
 
@@ -145,7 +188,9 @@ class ProgressTracker:
 
     def is_processed(self, message_id: int) -> bool:
         """Check if message was already processed."""
-        return message_id <= self.data["last_message_id"]
+        # Check in processed_ids list (more accurate) or skipped_ids
+        return (message_id in self.data.get("processed_ids", []) or
+                message_id in self.data.get("skipped_ids", []))
 
     def get_stats(self) -> Dict:
         """Get current statistics."""
@@ -192,6 +237,23 @@ class TelegramTransfer:
 
         return True
 
+    def sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename to prevent path traversal and invalid characters."""
+        # Remove path separators and null bytes
+        filename = filename.replace('/', '_').replace('\\', '_').replace('\0', '')
+        # Remove or replace other problematic characters
+        filename = re.sub(r'[<>:"|?*]', '_', filename)
+        # Remove leading/trailing spaces and dots
+        filename = filename.strip('. ')
+        # Ensure filename is not empty
+        if not filename:
+            filename = 'unnamed_file'
+        # Limit length (most filesystems have 255 char limit)
+        if len(filename) > 200:
+            name, ext = os.path.splitext(filename)
+            filename = name[:200-len(ext)] + ext
+        return filename
+
     async def get_channel_info(self, channel_id: str):
         """Get channel information."""
         try:
@@ -205,14 +267,29 @@ class TelegramTransfer:
             print(f"✗ Error accessing channel {channel_id}: {e}")
             return None
 
-    async def count_media_messages(self, source_entity) -> int:
-        """Count total media messages in source channel."""
-        print("\nCounting media files in source channel...")
+    async def count_media_messages(self, source_entity, limit: int = 100) -> int:
+        """Count total media messages in source channel (limited for performance)."""
+        print("\nEstimating media files in source channel...")
         count = 0
-        async for message in self.client.iter_messages(source_entity):
+        async for message in self.client.iter_messages(source_entity, limit=limit):
             if message.media:
                 count += 1
         return count
+
+    def cleanup_orphaned_files(self):
+        """Clean up any orphaned files from previous interrupted runs."""
+        if not self.download_path.exists():
+            return
+
+        files = list(self.download_path.glob('*'))
+        if files:
+            print(f"\n⚠ Found {len(files)} orphaned files from previous run")
+            for file_path in files:
+                try:
+                    file_path.unlink()
+                    print(f"  🗑 Deleted: {file_path.name}")
+                except Exception as e:
+                    print(f"  ⚠ Could not delete {file_path.name}: {e}")
 
     def get_file_info(self, message: Message) -> Optional[Dict]:
         """Extract file information from message."""
@@ -232,7 +309,9 @@ class TelegramTransfer:
             file_info["media_type"] = "photo"
             file_info["file_name"] = f"photo_{message.id}.jpg"
             if hasattr(message.media.photo, 'sizes'):
-                file_info["file_size"] = max([s.size if hasattr(s, 'size') else 0 for s in message.media.photo.sizes])
+                # Safely extract file size
+                sizes = [getattr(s, 'size', 0) for s in message.media.photo.sizes]
+                file_info["file_size"] = max(sizes) if sizes else 0
 
         # Document (video, file, audio, etc.)
         elif hasattr(message.media, 'document'):
@@ -243,23 +322,38 @@ class TelegramTransfer:
             # Try to get filename from attributes
             for attr in doc.attributes:
                 if isinstance(attr, DocumentAttributeFilename):
-                    file_info["file_name"] = attr.file_name
+                    file_info["file_name"] = self.sanitize_filename(attr.file_name)
                     break
 
             if not file_info["file_name"]:
-                file_info["file_name"] = f"file_{message.id}"
+                # Generate safe default name
+                mime_type = doc.mime_type if hasattr(doc, 'mime_type') else ''
+                ext = mime_type.split('/')[-1] if '/' in mime_type else ''
+                file_info["file_name"] = f"file_{message.id}.{ext}" if ext else f"file_{message.id}"
 
         else:
             return None
+
+        # Ensure filename is sanitized
+        if file_info["file_name"]:
+            file_info["file_name"] = self.sanitize_filename(file_info["file_name"])
 
         return file_info
 
     async def download_file(self, message: Message, file_info: Dict) -> Optional[Path]:
         """Download a single file."""
-        file_path = self.download_path / file_info["file_name"]
+        base_name = file_info["file_name"]
+        file_path = self.download_path / base_name
+
+        # Handle duplicate filenames
+        counter = 1
+        while file_path.exists():
+            name, ext = os.path.splitext(base_name)
+            file_path = self.download_path / f"{name}_{counter}{ext}"
+            counter += 1
 
         try:
-            print(f"  ⬇ Downloading: {file_info['file_name']}")
+            print(f"  ⬇ Downloading: {file_path.name}")
             print(f"    Size: {file_info['file_size'] / (1024*1024):.2f} MB")
 
             # Download with progress bar
@@ -268,19 +362,31 @@ class TelegramTransfer:
                 file=str(file_path)
             )
 
-            if file_path.exists():
+            # Verify file was downloaded and has content
+            if file_path.exists() and file_path.stat().st_size > 0:
                 print(f"  ✓ Downloaded successfully")
                 return file_path
             else:
-                print(f"  ✗ Download failed - file not found")
+                print(f"  ✗ Download failed - file not found or empty")
+                # Clean up empty file if it exists
+                if file_path.exists():
+                    file_path.unlink()
                 return None
 
         except Exception as e:
             print(f"  ✗ Download error: {e}")
+            # Clean up partial download
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                except:
+                    pass
             return None
 
-    async def upload_file(self, file_path: Path, caption: Optional[str], dest_entity) -> bool:
+    async def upload_file(self, file_path: Path, caption: Optional[str], dest_entity, retry_count: int = 0) -> bool:
         """Upload file to destination channel."""
+        max_retries = 3
+
         try:
             print(f"  ⬆ Uploading to destination channel...")
 
@@ -294,9 +400,14 @@ class TelegramTransfer:
             return True
 
         except FloodWaitError as e:
-            print(f"  ⚠ Rate limit hit. Waiting {e.seconds} seconds...")
-            await asyncio.sleep(e.seconds)
-            return await self.upload_file(file_path, caption, dest_entity)
+            if retry_count >= max_retries:
+                print(f"  ✗ Max retries reached for rate limiting")
+                return False
+
+            wait_time = min(e.seconds, 300)  # Cap wait at 5 minutes
+            print(f"  ⚠ Rate limit hit. Waiting {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+            return await self.upload_file(file_path, caption, dest_entity, retry_count + 1)
 
         except Exception as e:
             print(f"  ✗ Upload error: {e}")
@@ -313,6 +424,9 @@ class TelegramTransfer:
 
     async def transfer_all(self):
         """Main transfer loop."""
+        # Clean up any orphaned files from previous interrupted runs
+        self.cleanup_orphaned_files()
+
         source_entity = await self.get_channel_info(self.config.get("source_channel"))
         dest_entity = await self.get_channel_info(self.config.get("destination_channel"))
 
@@ -323,9 +437,9 @@ class TelegramTransfer:
         print(f"\n✓ Source: {getattr(source_entity, 'title', source_entity.id)}")
         print(f"✓ Destination: {getattr(dest_entity, 'title', dest_entity.id)}")
 
-        # Count total media
-        total_media = await self.count_media_messages(source_entity)
-        print(f"\n✓ Found {total_media} media files")
+        # Estimate media count (limited to avoid long delays)
+        estimated_count = await self.count_media_messages(source_entity, limit=100)
+        print(f"\n✓ Estimated media files: ~{estimated_count} (sampled from recent 100 messages)")
 
         # Check for resume
         stats = self.progress.get_stats()
@@ -367,7 +481,7 @@ class TelegramTransfer:
                 self.progress.mark_skipped(message.id)
                 continue
 
-            print(f"\n[{processed_in_session + 1}/{total_media - stats['processed']}] Processing message {message.id}")
+            print(f"\n[{stats['processed'] + processed_in_session + 1}] Processing message {message.id}")
 
             # Download
             file_path = await self.download_file(message, file_info)
