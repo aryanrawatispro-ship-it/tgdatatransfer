@@ -599,8 +599,23 @@ class TelegramTransfer:
     async def get_channel_info(self, channel_id: str):
         """Get channel information."""
         try:
-            entity = await self.client.get_entity(channel_id)
-            return entity
+            # For private channels (numeric IDs), we need to populate entity cache first
+            if isinstance(channel_id, str) and (channel_id.lstrip('-').isdigit() or channel_id.isdigit()):
+                # This is a numeric ID - iterate dialogs to populate cache
+                print(f"Looking up private channel {channel_id}...")
+                target_id = int(channel_id)
+                async for dialog in self.client.iter_dialogs():
+                    if dialog.entity.id == target_id:
+                        print(f"✓ Found channel: {dialog.title}")
+                        return dialog.entity
+                # Not found in dialogs
+                print(f"✗ Channel {channel_id} not found in your dialogs")
+                print("  Make sure you're a member of this channel/group.")
+                return None
+            else:
+                # Username-based lookup (starts with @)
+                entity = await self.client.get_entity(channel_id)
+                return entity
         except ChannelPrivateError:
             print(f"✗ Cannot access channel: {channel_id}")
             print("  Make sure you're a member of the channel.")
