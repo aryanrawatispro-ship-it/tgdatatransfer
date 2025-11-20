@@ -126,6 +126,7 @@ async def main():
             messages.append(msg)
 
     total = len(messages)
+    messages.reverse()  # Process from oldest to newest (first message to last)
     print(f"Found {total} media files\n")
 
     print("="*60)
