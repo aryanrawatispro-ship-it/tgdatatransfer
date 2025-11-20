@@ -735,11 +735,27 @@ class TelegramTransfer:
             print(f"  ⬇ Downloading: {file_path.name}")
             print(f"    Size: {file_info['file_size'] / (1024*1024):.2f} MB")
 
+            # Progress tracking
+            start_time = datetime.now()
+            last_update = [start_time]  # Use list to modify in nested function
+
+            def progress_callback(current, total):
+                now = datetime.now()
+                # Update every 2 seconds
+                if (now - last_update[0]).total_seconds() >= 2:
+                    percent = (current / total) * 100
+                    elapsed = (now - start_time).total_seconds()
+                    speed_mbps = (current / (1024*1024)) / elapsed if elapsed > 0 else 0
+                    print(f"    Progress: {percent:.1f}% | Speed: {speed_mbps:.2f} MB/s", end='\r')
+                    last_update[0] = now
+
             # Download with progress bar
             await self.client.download_media(
                 message.media,
-                file=str(file_path)
+                file=str(file_path),
+                progress_callback=progress_callback
             )
+            print()  # New line after progress
 
             # Verify file was downloaded and has content
             if file_path.exists() and file_path.stat().st_size > 0:
@@ -767,13 +783,30 @@ class TelegramTransfer:
         max_retries = 3
 
         try:
-            print(f"  ⬆ Uploading to destination channel...")
+            file_size_mb = file_path.stat().st_size / (1024*1024)
+            print(f"  ⬆ Uploading to destination channel... ({file_size_mb:.2f} MB)")
+
+            # Progress tracking
+            start_time = datetime.now()
+            last_update = [start_time]
+
+            def progress_callback(current, total):
+                now = datetime.now()
+                # Update every 2 seconds
+                if (now - last_update[0]).total_seconds() >= 2:
+                    percent = (current / total) * 100
+                    elapsed = (now - start_time).total_seconds()
+                    speed_mbps = (current / (1024*1024)) / elapsed if elapsed > 0 else 0
+                    print(f"    Progress: {percent:.1f}% | Speed: {speed_mbps:.2f} MB/s", end='\r')
+                    last_update[0] = now
 
             await self.client.send_file(
                 dest_entity,
                 file=str(file_path),
-                caption=caption
+                caption=caption,
+                progress_callback=progress_callback
             )
+            print()  # New line after progress
 
             print(f"  ✓ Uploaded successfully")
             return True
