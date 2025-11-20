@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from telethon import TelegramClient
-from telethon.tl.types import DocumentAttributeFilename, Message
+from telethon.tl.types import DocumentAttributeFilename, Message, Channel
 from telethon.errors import FloodWaitError, ChannelPrivateError
 import re
 
@@ -49,6 +49,144 @@ class Config:
                 return self._interactive_setup()
         else:
             return self._interactive_setup()
+
+    async def _fetch_channels(self, client: TelegramClient) -> Dict[str, List[Dict]]:
+        """Fetch all accessible channels and groups."""
+        channels = []
+        supergroups = []
+
+        async for dialog in client.iter_dialogs():
+            entity = dialog.entity
+
+            if isinstance(entity, Channel):
+                info = {
+                    'title': dialog.title,
+                    'id': entity.id,
+                    'username': entity.username
+                }
+
+                if entity.broadcast:
+                    channels.append(info)
+                elif entity.megagroup:
+                    supergroups.append(info)
+
+        return {'channels': channels, 'supergroups': supergroups}
+
+    def _select_channel(self, available_channels: Dict[str, List[Dict]], channel_type: str) -> str:
+        """Let user select a channel from the list."""
+        print(f"\n{'='*60}")
+        print(f"SELECT {channel_type.upper()} CHANNEL")
+        print(f"{'='*60}\n")
+
+        # Combine all channels
+        all_channels = available_channels['channels'] + available_channels['supergroups']
+
+        if not all_channels:
+            print("⚠ No channels found! You need to:")
+            print("  1. Join some channels first")
+            print("  2. Create channels and be an admin")
+            print("\nFalling back to manual entry...")
+            return input(f"Enter {channel_type} channel ID or @username: ").strip()
+
+        # Display channels
+        print(f"Found {len(all_channels)} accessible channel(s)/group(s):\n")
+        for i, ch in enumerate(all_channels, 1):
+            print(f"{i}. {ch['title']}")
+            if ch['username']:
+                print(f"   @{ch['username']} (public)")
+            else:
+                print(f"   ID: {ch['id']} (private)")
+            print()
+
+        # Let user choose
+        print(f"Select {channel_type} channel:")
+        print(f"  - Enter a number (1-{len(all_channels)})")
+        print(f"  - Or type 'manual' to enter ID manually\n")
+
+        while True:
+            choice = input("Your choice: ").strip()
+
+            if choice.lower() == 'manual':
+                return input(f"\nEnter {channel_type} channel ID or @username: ").strip()
+
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(all_channels):
+                    selected = all_channels[idx]
+                    if selected['username']:
+                        channel_id = f"@{selected['username']}"
+                    else:
+                        channel_id = str(selected['id'])
+
+                    print(f"✓ Selected: {selected['title']}")
+                    print(f"  Using: {channel_id}\n")
+                    return channel_id
+                else:
+                    print(f"  ✗ Please enter a number between 1 and {len(all_channels)}")
+            except ValueError:
+                print(f"  ✗ Invalid input. Enter a number (1-{len(all_channels)}) or 'manual'")
+
+    async def _interactive_setup_async(self, api_id: str, api_hash: str, login_method: str, phone: str) -> Dict:
+        """Async part of interactive setup - authenticate and fetch channels."""
+        # Create temporary client
+        print("\nAuthenticating to fetch your channels...")
+        client = TelegramClient('session', int(api_id), api_hash)
+
+        try:
+            if login_method == "qr":
+                # QR code login
+                await client.connect()
+                if not await client.is_user_authorized():
+                    print("\nQR Code Login")
+                    print("-" * 60)
+                    qr_login = await client.qr_login()
+
+                    try:
+                        import qrcode
+                        qr = qrcode.QRCode(version=1, box_size=1, border=1)
+                        qr.add_data(qr_login.url)
+                        qr.make(fit=True)
+                        print("\nScan this QR code with Telegram app:")
+                        print("(Settings > Devices > Link Desktop Device)\n")
+                        qr.print_ascii(invert=True)
+                    except ImportError:
+                        print(f"\nQR Code URL: {qr_login.url}")
+                        print("Scan with Telegram app or visit:")
+                        print(f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={qr_login.url}\n")
+
+                    print("\nWaiting for QR scan...")
+                    await qr_login.wait()
+            else:
+                # Phone login
+                await client.start(phone=phone)
+
+            if not await client.is_user_authorized():
+                print("\n✗ Authentication failed!")
+                await client.disconnect()
+                return None
+
+            me = await client.get_me()
+            print(f"✓ Authenticated as: {me.first_name}\n")
+
+            # Fetch channels
+            print("Fetching your accessible channels...")
+            available_channels = await self._fetch_channels(client)
+
+            # Select source and destination
+            source_channel = self._select_channel(available_channels, "SOURCE")
+            destination_channel = self._select_channel(available_channels, "DESTINATION")
+
+            await client.disconnect()
+
+            return {
+                'source_channel': source_channel,
+                'destination_channel': destination_channel
+            }
+
+        except Exception as e:
+            print(f"\n✗ Error during setup: {e}")
+            await client.disconnect()
+            return None
 
     def _interactive_setup(self) -> Dict:
         """Interactive configuration setup."""
@@ -87,19 +225,24 @@ class Config:
                 break
             elif choice == "2":
                 login_method = "qr"
-                print("✓ QR code login selected. You'll scan a QR code when the script starts.")
+                print("✓ QR code login selected. You'll scan a QR code during channel selection.")
                 break
             else:
                 print("  ✗ Invalid choice. Please enter 1 or 2.")
 
+        # Authenticate and fetch channels (async part)
         print("\n" + "-"*60)
-        print("Channel Configuration")
-        print("-"*60 + "\n")
-        print("You can use channel username (@channelname) or numeric ID.")
-        print("For private channels, use the numeric ID (e.g., -1001234567890).\n")
+        print("Channel Selection")
+        print("-"*60)
 
-        source_channel = input("Enter SOURCE channel (to download from): ").strip()
-        destination_channel = input("Enter DESTINATION channel (to upload to): ").strip()
+        channel_selection = asyncio.run(self._interactive_setup_async(api_id, api_hash, login_method, phone))
+
+        if not channel_selection:
+            print("\n✗ Setup failed. Please try again.")
+            sys.exit(1)
+
+        source_channel = channel_selection['source_channel']
+        destination_channel = channel_selection['destination_channel']
 
         print("\n" + "-"*60)
         print("Optional Settings")
