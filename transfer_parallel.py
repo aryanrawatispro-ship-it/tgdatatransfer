@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Parallel transfer - downloads next file while uploading current one
-Can be ~2x faster than sequential processing
+Telegram Channel Transfer - Sequential processing
+Downloads and uploads files one at a time with progress tracking
 """
 import asyncio
 import json
@@ -17,7 +17,9 @@ from telethon.errors import FloodWaitError
 class ProgressTracker:
     """Tracks transfer progress with resume capability."""
 
-    def __init__(self, progress_path: str = "progress_parallel.json"):
+    def __init__(self, progress_path: str = "transfer_data/progress.json"):
+        # Ensure transfer_data directory exists
+        Path("transfer_data").mkdir(exist_ok=True)
         self.progress_path = progress_path
         self.data = self._load_progress()
 
@@ -389,95 +391,64 @@ async def main():
         return
 
     print("="*60)
-    print("PARALLEL TRANSFER MODE")
-    print("Downloads next file while uploading current one")
+    print("TRANSFER MODE")
+    print("Processing files sequentially")
     print("="*60 + "\n")
 
-    # Process messages
+    # Process messages sequentially
     processed = 0
     errors = 0
 
-    download_task = None
-    next_idx = 0
+    for idx, (msg, file_info) in enumerate(messages, 1):
+        # Check if it's a text-only message
+        if file_info is None:
+            # Text message - process immediately (no download needed)
+            print(f"\n[{idx}/{total}] Text message")
+            success = await copy_text_message(client, msg, dest_entity)
 
-    while next_idx < total or download_task is not None:
-        # Start processing next message if not currently downloading
-        if download_task is None and next_idx < total:
-            msg, file_info = messages[next_idx]
-            next_idx += 1
-
-            # Check if it's a text-only message
-            if file_info is None:
-                # Text message - process immediately (no download needed)
-                print(f"\n[{next_idx}/{total}] Text message")
-                success = await copy_text_message(client, msg, dest_entity)
-
-                if success:
-                    progress.mark_processed(msg.id, 0)
-                    processed += 1
-                    print(f"  ✓ Complete ({processed}/{total})")
-                else:
-                    progress.mark_failed(msg.id)
-                    errors += 1
-                continue
-
-            # Media file - start download
-            file_size_mb = file_info["file_size"] / (1024*1024)
-            print(f"\n[{next_idx}/{total}] {file_info['file_name']} ({file_size_mb:.2f} MB)")
-            download_task = asyncio.create_task(download_file(client, msg, download_path, file_info))
-            current_msg = msg
-            current_file_info = file_info
-
-        # Wait for download to complete
-        if download_task:
-            file_path = await download_task
-            download_task = None
-
-            if file_path and file_path.exists():
-                # Get caption
-                caption = current_msg.message if config.get('preserve_captions', True) else None
-
-                # Start next download in parallel with upload (only if next is media)
-                if next_idx < total:
-                    next_msg, next_file_info = messages[next_idx]
-                    # Only start parallel download if next message has media
-                    if next_file_info is not None:
-                        next_idx += 1
-                        file_size_mb = next_file_info["file_size"] / (1024*1024)
-                        print(f"\n[{next_idx}/{total}] {next_file_info['file_name']} ({file_size_mb:.2f} MB)")
-                        print(f"  ⬇ Starting download in parallel...")
-                        download_task = asyncio.create_task(download_file(client, next_msg, download_path, next_file_info))
-                        current_msg_temp = next_msg
-                        current_file_info_temp = next_file_info
-
-                # Upload current file
-                success = await upload_file(client, file_path, caption, dest_entity)
-
-                # Delete file
-                try:
-                    file_path.unlink()
-                    print("  🗑 Deleted local file")
-                except:
-                    pass
-
-                if success:
-                    # Mark as processed
-                    file_size_mb = current_file_info["file_size"] / (1024*1024)
-                    progress.mark_processed(current_msg.id, file_size_mb)
-                    processed += 1
-                    print(f"  ✓ Complete ({processed}/{total})")
-                else:
-                    # Mark as failed
-                    progress.mark_failed(current_msg.id)
-                    errors += 1
-
-                if download_task:
-                    current_msg = current_msg_temp
-                    current_file_info = current_file_info_temp
+            if success:
+                progress.mark_processed(msg.id, 0)
+                processed += 1
+                print(f"  ✓ Complete ({processed}/{total})")
             else:
-                # Mark as failed if download failed
-                progress.mark_failed(current_msg.id)
+                progress.mark_failed(msg.id)
                 errors += 1
+            continue
+
+        # Media file - process sequentially
+        file_size_mb = file_info["file_size"] / (1024*1024)
+        print(f"\n[{idx}/{total}] {file_info['file_name']} ({file_size_mb:.2f} MB)")
+
+        # Download
+        file_path = await download_file(client, msg, download_path, file_info)
+
+        if file_path and file_path.exists():
+            # Get caption
+            caption = msg.message if config.get('preserve_captions', True) else None
+
+            # Upload
+            success = await upload_file(client, file_path, caption, dest_entity)
+
+            # Delete file
+            try:
+                file_path.unlink()
+                print("  🗑 Deleted local file")
+            except:
+                pass
+
+            if success:
+                # Mark as processed
+                progress.mark_processed(msg.id, file_size_mb)
+                processed += 1
+                print(f"  ✓ Complete ({processed}/{total})")
+            else:
+                # Mark as failed
+                progress.mark_failed(msg.id)
+                errors += 1
+        else:
+            # Mark as failed if download failed
+            progress.mark_failed(msg.id)
+            errors += 1
 
     print(f"\n\n{'='*60}")
     print("COMPLETED!")
