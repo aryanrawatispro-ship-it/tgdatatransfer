@@ -162,7 +162,10 @@ class Config:
 
             if not await client.is_user_authorized():
                 print("\n✗ Authentication failed!")
-                await client.disconnect()
+                try:
+                    await client.disconnect()
+                except:
+                    pass
                 return None
 
             me = await client.get_me()
@@ -172,20 +175,42 @@ class Config:
             print("Fetching your accessible channels...")
             available_channels = await self._fetch_channels(client)
 
+            if not available_channels['channels'] and not available_channels['supergroups']:
+                print("\n⚠ No channels or groups found!")
+                print("Make sure you:")
+                print("  1. Are a member of at least one channel/group")
+                print("  2. Have created channels where you're an admin")
+                print("\nYou can still enter channel IDs manually.\n")
+
             # Select source and destination
             source_channel = self._select_channel(available_channels, "SOURCE")
             destination_channel = self._select_channel(available_channels, "DESTINATION")
 
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            except:
+                pass
 
             return {
                 'source_channel': source_channel,
                 'destination_channel': destination_channel
             }
 
+        except KeyboardInterrupt:
+            print("\n\n⚠ Setup cancelled by user")
+            try:
+                await client.disconnect()
+            except:
+                pass
+            return None
         except Exception as e:
             print(f"\n✗ Error during setup: {e}")
-            await client.disconnect()
+            import traceback
+            traceback.print_exc()
+            try:
+                await client.disconnect()
+            except:
+                pass
             return None
 
     def _interactive_setup(self) -> Dict:
@@ -235,7 +260,10 @@ class Config:
         print("Channel Selection")
         print("-"*60)
 
-        channel_selection = asyncio.run(self._interactive_setup_async(api_id, api_hash, login_method, phone))
+        # Run async channel selection
+        channel_selection = asyncio.run(
+            self._interactive_setup_async(api_id, api_hash, login_method, phone)
+        )
 
         if not channel_selection:
             print("\n✗ Setup failed. Please try again.")
@@ -287,11 +315,15 @@ class Config:
         }
 
         # Save configuration
-        with open(self.config_path, 'w') as f:
-            json.dump(config, f, indent=2)
-
-        print(f"\n✓ Configuration saved to {self.config_path}")
-        print("You can edit this file directly to change settings.\n")
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            print(f"\n✓ Configuration saved to {self.config_path}")
+            print("You can edit this file directly to change settings.\n")
+        except Exception as e:
+            print(f"\n✗ Error saving configuration: {e}")
+            print("  Make sure you have write permissions in this directory.")
+            sys.exit(1)
 
         return config
 
@@ -399,7 +431,13 @@ class TelegramTransfer:
         self.download_path = Path(config.get("download_path", "./temp_downloads"))
 
         # Create download directory
-        self.download_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self.download_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"✗ Error creating download directory: {e}")
+            print(f"  Path: {self.download_path}")
+            print(f"  Make sure you have write permissions.")
+            sys.exit(1)
 
     async def initialize(self):
         """Initialize Telegram client and authenticate."""
@@ -520,9 +558,20 @@ class TelegramTransfer:
         except ChannelPrivateError:
             print(f"✗ Cannot access channel: {channel_id}")
             print("  Make sure you're a member of the channel.")
+            print("  For private channels, you must be a member to access them.")
+            return None
+        except ValueError as e:
+            print(f"✗ Invalid channel ID/username: {channel_id}")
+            print(f"  Error: {e}")
+            print("  Tip: Use the interactive setup (rm config.json && python3 transfer.py)")
+            print("       to select channels from a numbered list.")
             return None
         except Exception as e:
             print(f"✗ Error accessing channel {channel_id}: {e}")
+            print(f"  This might mean:")
+            print(f"    - The channel doesn't exist")
+            print(f"    - You don't have access to it")
+            print(f"    - The ID/username is incorrect")
             return None
 
     async def count_media_messages(self, source_entity, limit: int = 100) -> int:
@@ -856,21 +905,21 @@ class TelegramTransfer:
                 print("\n✓ Disconnected from Telegram\n")
 
 
-async def main():
+async def main(config: Config):
     """Main entry point."""
-    print("\n╔════════════════════════════════════════════════════════════╗")
-    print("║    TELEGRAM CHANNEL MEDIA TRANSFER TOOL                    ║")
-    print("║    Low Storage VPS Optimized                               ║")
-    print("╚════════════════════════════════════════════════════════════╝")
-
-    # Load configuration
-    config = Config()
-
     # Create and run transfer
     transfer = TelegramTransfer(config)
     await transfer.run()
 
 
 if __name__ == "__main__":
+    print("\n╔════════════════════════════════════════════════════════════╗")
+    print("║    TELEGRAM CHANNEL MEDIA TRANSFER TOOL                    ║")
+    print("║    Low Storage VPS Optimized                               ║")
+    print("╚════════════════════════════════════════════════════════════╝")
+
+    # Load configuration (before entering async context)
+    config = Config()
+
     # Run async main
-    asyncio.run(main())
+    asyncio.run(main(config))
