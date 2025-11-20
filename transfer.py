@@ -130,12 +130,31 @@ class Config:
         """Async part of interactive setup - authenticate and fetch channels."""
         # Create temporary client
         print("\nAuthenticating to fetch your channels...")
-        client = TelegramClient('session', int(api_id), api_hash)
+        client = TelegramClient(
+            'session',
+            int(api_id),
+            api_hash,
+            connection_retries=10,
+            retry_delay=2,
+            timeout=30
+        )
 
         try:
             if login_method == "qr":
-                # QR code login
-                await client.connect()
+                # QR code login with retry
+                print("Connecting to Telegram...")
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        await client.connect()
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            print(f"⚠ Connection attempt {attempt + 1} failed, retrying...")
+                            await asyncio.sleep(5)
+                        else:
+                            print(f"✗ Cannot connect to Telegram. Check your internet connection.")
+                            raise
                 if not await client.is_user_authorized():
                     print("\nQR Code Login")
                     print("-" * 60)
@@ -157,8 +176,20 @@ class Config:
                     print("\nWaiting for QR scan...")
                     await qr_login.wait()
             else:
-                # Phone login
-                await client.start(phone=phone)
+                # Phone login with retry
+                print("Connecting to Telegram...")
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        await client.start(phone=phone)
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            print(f"⚠ Connection attempt {attempt + 1} failed, retrying...")
+                            await asyncio.sleep(5)
+                        else:
+                            print(f"✗ Cannot connect to Telegram. Check your internet connection.")
+                            raise
 
             if not await client.is_user_authorized():
                 print("\n✗ Authentication failed!")
@@ -448,10 +479,25 @@ class TelegramTransfer:
         self.client = TelegramClient(
             'session',
             int(self.config.get("api_id")),
-            self.config.get("api_hash")
+            self.config.get("api_hash"),
+            connection_retries=10,
+            retry_delay=2,
+            timeout=30
         )
 
-        await self.client.connect()
+        # Try to connect with retries
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await self.client.connect()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"⚠ Connection attempt {attempt + 1} failed, retrying in 5 seconds...")
+                    await asyncio.sleep(5)
+                else:
+                    print(f"✗ Failed to connect after {max_retries} attempts")
+                    raise
 
         # Check if already authorized
         if await self.client.is_user_authorized():
