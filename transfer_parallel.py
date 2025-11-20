@@ -12,6 +12,69 @@ from telethon import TelegramClient
 from telethon.tl.types import Channel
 from telethon.errors import FloodWaitError
 
+
+class ProgressTracker:
+    """Tracks transfer progress with resume capability."""
+
+    def __init__(self, progress_path: str = "progress_parallel.json"):
+        self.progress_path = progress_path
+        self.data = self._load_progress()
+
+    def _load_progress(self):
+        """Load existing progress or create new."""
+        if os.path.exists(self.progress_path):
+            try:
+                with open(self.progress_path, 'r') as f:
+                    data = json.load(f)
+                    if "processed_ids" not in data:
+                        data["processed_ids"] = []
+                    return data
+            except json.JSONDecodeError:
+                print(f"⚠ Progress file corrupted. Starting fresh.")
+                backup_path = f"{self.progress_path}.backup"
+                os.rename(self.progress_path, backup_path)
+
+        return {
+            "processed_ids": [],
+            "failed_ids": [],
+            "processed_count": 0,
+            "total_size_mb": 0,
+            "started_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat()
+        }
+
+    def save(self):
+        """Save current progress."""
+        self.data["last_updated"] = datetime.now().isoformat()
+        with open(self.progress_path, 'w') as f:
+            json.dump(self.data, f, indent=2)
+
+    def mark_processed(self, message_id: int, file_size_mb: float = 0):
+        """Mark a message as successfully processed."""
+        if message_id not in self.data["processed_ids"]:
+            self.data["processed_ids"].append(message_id)
+            self.data["processed_count"] += 1
+        self.data["total_size_mb"] += file_size_mb
+        self.save()
+
+    def mark_failed(self, message_id: int):
+        """Mark a message as failed."""
+        if message_id not in self.data["failed_ids"]:
+            self.data["failed_ids"].append(message_id)
+        self.save()
+
+    def is_processed(self, message_id: int) -> bool:
+        """Check if message was already processed."""
+        return message_id in self.data["processed_ids"]
+
+    def get_stats(self):
+        """Get current statistics."""
+        return {
+            "processed": self.data["processed_count"],
+            "failed": len(self.data["failed_ids"]),
+            "total_size_mb": round(self.data["total_size_mb"], 2)
+        }
+
 async def get_channel(client, channel_id):
     """Find channel by ID."""
     if channel_id.lstrip('-').isdigit():
@@ -87,6 +150,9 @@ async def main():
     download_path = Path(config.get('download_path', './temp_downloads'))
     download_path.mkdir(parents=True, exist_ok=True)
 
+    # Initialize progress tracker
+    progress = ProgressTracker()
+
     # Create client
     client = TelegramClient(
         'session',
@@ -121,13 +187,29 @@ async def main():
     # Count messages
     print("Counting messages...")
     messages = []
+    skipped = 0
     async for msg in client.iter_messages(source_entity):
         if msg.media:
+            # Skip already processed messages
+            if progress.is_processed(msg.id):
+                skipped += 1
+                continue
             messages.append(msg)
 
     total = len(messages)
     messages.reverse()  # Process from oldest to newest (first message to last)
-    print(f"Found {total} media files\n")
+
+    if skipped > 0:
+        print(f"Found {total} new media files ({skipped} already processed)\n")
+    else:
+        print(f"Found {total} media files\n")
+
+    if total == 0:
+        stats = progress.get_stats()
+        print("✓ All files already transferred!")
+        print(f"\nStats: {stats['processed']} files, {stats['total_size_mb']} MB total")
+        await client.disconnect()
+        return
 
     print("="*60)
     print("PARALLEL TRANSFER MODE")
@@ -180,21 +262,39 @@ async def main():
                     pass
 
                 if success:
+                    # Mark as processed
+                    file_size_mb = current_msg.file.size / (1024*1024) if current_msg.file else 0
+                    progress.mark_processed(current_msg.id, file_size_mb)
                     processed += 1
                     print(f"  ✓ Complete ({processed}/{total})")
                 else:
+                    # Mark as failed
+                    progress.mark_failed(current_msg.id)
                     errors += 1
 
                 if download_task:
                     current_msg = next_msg
             else:
+                # Mark as failed if download failed
+                progress.mark_failed(current_msg.id)
                 errors += 1
 
     print(f"\n\n{'='*60}")
     print("COMPLETED!")
     print("="*60)
-    print(f"✓ Transferred: {processed}")
-    print(f"✗ Errors: {errors}\n")
+
+    # Show session stats
+    print(f"\nThis session:")
+    print(f"  ✓ Transferred: {processed}")
+    print(f"  ✗ Errors: {errors}")
+
+    # Show overall stats
+    stats = progress.get_stats()
+    print(f"\nOverall progress:")
+    print(f"  ✓ Total processed: {stats['processed']} files")
+    print(f"  ✗ Total failed: {stats['failed']} files")
+    print(f"  📦 Total size: {stats['total_size_mb']} MB")
+    print()
 
     await client.disconnect()
 
