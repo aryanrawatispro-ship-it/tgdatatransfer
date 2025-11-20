@@ -142,6 +142,22 @@ async def upload_file(client, file_path, caption, dest_entity):
         print(f"\n✗ Upload error: {e}")
         return False
 
+async def copy_text_message(client, message, dest_entity):
+    """Copy text-only message to destination channel."""
+    try:
+        print(f"  📝 Copying text message...")
+        await client.send_message(dest_entity, message.message)
+        print(f"  ✓ Text copied")
+        return True
+    except FloodWaitError as e:
+        print(f"\n⚠ Rate limit: waiting {e.seconds}s...")
+        await asyncio.sleep(e.seconds)
+        await client.send_message(dest_entity, message.message)
+        return True
+    except Exception as e:
+        print(f"\n✗ Text copy error: {e}")
+        return False
+
 async def main():
     # Load config
     with open('config.json', 'r') as f:
@@ -186,10 +202,12 @@ async def main():
 
     # Count messages
     print("Counting messages...")
+    copy_text = config.get('copy_text_messages', True)
     messages = []
     skipped = 0
     async for msg in client.iter_messages(source_entity):
-        if msg.media:
+        # Include messages with media OR text (if enabled)
+        if msg.media or (copy_text and msg.message):
             # Skip already processed messages
             if progress.is_processed(msg.id):
                 skipped += 1
@@ -200,14 +218,14 @@ async def main():
     messages.reverse()  # Process from oldest to newest (first message to last)
 
     if skipped > 0:
-        print(f"Found {total} new media files ({skipped} already processed)\n")
+        print(f"Found {total} new messages ({skipped} already processed)\n")
     else:
-        print(f"Found {total} media files\n")
+        print(f"Found {total} messages\n")
 
     if total == 0:
         stats = progress.get_stats()
-        print("✓ All files already transferred!")
-        print(f"\nStats: {stats['processed']} files, {stats['total_size_mb']} MB total")
+        print("✓ All messages already transferred!")
+        print(f"\nStats: {stats['processed']} messages, {stats['total_size_mb']} MB total")
         await client.disconnect()
         return
 
@@ -216,7 +234,7 @@ async def main():
     print("Downloads next file while uploading current one")
     print("="*60 + "\n")
 
-    # Process files
+    # Process messages
     processed = 0
     errors = 0
 
@@ -224,12 +242,29 @@ async def main():
     next_idx = 0
 
     while next_idx < total or download_task is not None:
-        # Start downloading next file if not already downloading
+        # Start processing next message if not currently downloading
         if download_task is None and next_idx < total:
             msg = messages[next_idx]
             next_idx += 1
+
+            # Check if it's a text-only message
+            if not msg.media and msg.message:
+                # Text message - process immediately (no download needed)
+                print(f"\n[{next_idx}/{total}] Text message")
+                success = await copy_text_message(client, msg, dest_entity)
+
+                if success:
+                    progress.mark_processed(msg.id, 0)
+                    processed += 1
+                    print(f"  ✓ Complete ({processed}/{total})")
+                else:
+                    progress.mark_failed(msg.id)
+                    errors += 1
+                continue
+
+            # Media file - start download
             file_size = msg.file.size if msg.file else 0
-            print(f"\n[{next_idx}/{total}] Processing (Size: {file_size/(1024*1024):.2f} MB)")
+            print(f"\n[{next_idx}/{total}] Media file (Size: {file_size/(1024*1024):.2f} MB)")
             download_task = asyncio.create_task(download_file(client, msg, download_path))
             current_msg = msg
 
@@ -242,14 +277,16 @@ async def main():
                 # Get caption
                 caption = current_msg.message if config.get('preserve_captions', True) else None
 
-                # Start next download in parallel with upload
+                # Start next download in parallel with upload (only if next is media)
                 if next_idx < total:
-                    msg = messages[next_idx]
-                    next_idx += 1
-                    file_size = msg.file.size if msg.file else 0
-                    print(f"\n[{next_idx}/{total}] Downloading next while uploading current...")
-                    download_task = asyncio.create_task(download_file(client, msg, download_path))
-                    next_msg = msg
+                    next_msg = messages[next_idx]
+                    # Only start parallel download if next message has media
+                    if next_msg.media:
+                        next_idx += 1
+                        file_size = next_msg.file.size if next_msg.file else 0
+                        print(f"\n[{next_idx}/{total}] Downloading next while uploading current...")
+                        download_task = asyncio.create_task(download_file(client, next_msg, download_path))
+                        current_msg_temp = next_msg
 
                 # Upload current file
                 success = await upload_file(client, file_path, caption, dest_entity)
@@ -273,7 +310,7 @@ async def main():
                     errors += 1
 
                 if download_task:
-                    current_msg = next_msg
+                    current_msg = current_msg_temp
             else:
                 # Mark as failed if download failed
                 progress.mark_failed(current_msg.id)
@@ -291,8 +328,8 @@ async def main():
     # Show overall stats
     stats = progress.get_stats()
     print(f"\nOverall progress:")
-    print(f"  ✓ Total processed: {stats['processed']} files")
-    print(f"  ✗ Total failed: {stats['failed']} files")
+    print(f"  ✓ Total processed: {stats['processed']} messages")
+    print(f"  ✗ Total failed: {stats['failed']} messages")
     print(f"  📦 Total size: {stats['total_size_mb']} MB")
     print()
 
