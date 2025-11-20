@@ -202,11 +202,13 @@ async def download_file(client, message, download_path, file_info):
 
     def progress(current, total):
         now = datetime.now()
-        if (now - last_update[0]).total_seconds() >= 2:
+        if (now - last_update[0]).total_seconds() >= 1:
             percent = (current / total) * 100
             elapsed = (now - start_time).total_seconds()
             speed = (current / (1024*1024)) / elapsed if elapsed > 0 else 0
-            print(f"  ⬇ Download: {percent:.1f}% | {speed:.2f} MB/s", end='\r')
+            mb_current = current / (1024*1024)
+            mb_total = total / (1024*1024)
+            print(f"    ⬇ Downloading: {mb_current:.1f}/{mb_total:.1f} MB ({percent:.1f}%) - {speed:.2f} MB/s", end='\r')
             last_update[0] = now
 
     try:
@@ -214,7 +216,8 @@ async def download_file(client, message, download_path, file_info):
         print(f"    Size: {file_info['file_size'] / (1024*1024):.2f} MB")
 
         await client.download_media(message.media, file=str(file_path), progress_callback=progress)
-        print()  # New line
+        print()  # Clear progress line
+        print(f"    ✓ Download complete")
 
         # Verify file was downloaded
         if file_path.exists() and file_path.stat().st_size > 0:
@@ -240,23 +243,32 @@ async def upload_file(client, file_path, caption, dest_entity):
     start_time = datetime.now()
     last_update = [start_time]
 
+    # Get file size
+    file_size = file_path.stat().st_size
+    file_size_mb = file_size / (1024*1024)
+
     def progress(current, total):
         now = datetime.now()
-        if (now - last_update[0]).total_seconds() >= 2:
+        if (now - last_update[0]).total_seconds() >= 1:
             percent = (current / total) * 100
             elapsed = (now - start_time).total_seconds()
             speed = (current / (1024*1024)) / elapsed if elapsed > 0 else 0
-            print(f"  ⬆ Upload: {percent:.1f}% | {speed:.2f} MB/s", end='\r')
+            mb_current = current / (1024*1024)
+            mb_total = total / (1024*1024)
+            print(f"    ⬆ Uploading: {mb_current:.1f}/{mb_total:.1f} MB ({percent:.1f}%) - {speed:.2f} MB/s", end='\r')
             last_update[0] = now
 
     try:
+        print(f"  ⬆ Uploading to destination... ({file_size_mb:.2f} MB)")
         await client.send_file(dest_entity, file=str(file_path), caption=caption, progress_callback=progress)
-        print()  # New line
+        print()  # Clear progress line
+        print(f"    ✓ Upload complete")
         return True
     except FloodWaitError as e:
         print(f"\n⚠ Rate limit: waiting {e.seconds}s...")
         await asyncio.sleep(e.seconds)
         await client.send_file(dest_entity, file=str(file_path), caption=caption)
+        print(f"    ✓ Upload complete")
         return True
     except Exception as e:
         print(f"\n✗ Upload error: {e}")
@@ -432,7 +444,8 @@ async def main():
                     if next_file_info is not None:
                         next_idx += 1
                         file_size_mb = next_file_info["file_size"] / (1024*1024)
-                        print(f"\n[{next_idx}/{total}] Downloading next while uploading current...")
+                        print(f"\n[{next_idx}/{total}] {next_file_info['file_name']} ({file_size_mb:.2f} MB)")
+                        print(f"  ⬇ Starting download in parallel...")
                         download_task = asyncio.create_task(download_file(client, next_msg, download_path, next_file_info))
                         current_msg_temp = next_msg
                         current_file_info_temp = next_file_info
