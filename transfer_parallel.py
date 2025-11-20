@@ -6,10 +6,11 @@ Can be ~2x faster than sequential processing
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from datetime import datetime
 from telethon import TelegramClient
-from telethon.tl.types import Channel
+from telethon.tl.types import Channel, DocumentAttributeFilename
 from telethon.errors import FloodWaitError
 
 
@@ -63,17 +64,110 @@ class ProgressTracker:
             self.data["failed_ids"].append(message_id)
         self.save()
 
+    def mark_skipped(self, message_id: int):
+        """Mark a message as skipped."""
+        if "skipped_ids" not in self.data:
+            self.data["skipped_ids"] = []
+        if message_id not in self.data["skipped_ids"]:
+            self.data["skipped_ids"].append(message_id)
+        self.save()
+
     def is_processed(self, message_id: int) -> bool:
         """Check if message was already processed."""
-        return message_id in self.data["processed_ids"]
+        return (message_id in self.data["processed_ids"] or
+                message_id in self.data.get("skipped_ids", []))
 
     def get_stats(self):
         """Get current statistics."""
         return {
             "processed": self.data["processed_count"],
             "failed": len(self.data["failed_ids"]),
+            "skipped": len(self.data.get("skipped_ids", [])),
             "total_size_mb": round(self.data["total_size_mb"], 2)
         }
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal and invalid characters."""
+    # Remove path separators and null bytes
+    filename = filename.replace('/', '_').replace('\\', '_').replace('\0', '')
+    # Remove or replace other problematic characters
+    filename = re.sub(r'[<>:"|?*]', '_', filename)
+    # Remove leading/trailing spaces and dots
+    filename = filename.strip('. ')
+    # Ensure filename is not empty
+    if not filename:
+        filename = 'unnamed_file'
+    # Limit length (most filesystems have 255 char limit)
+    if len(filename) > 200:
+        name, ext = os.path.splitext(filename)
+        filename = name[:200-len(ext)] + ext
+    return filename
+
+
+def cleanup_orphaned_files(download_path: Path):
+    """Clean up any orphaned files from previous interrupted runs."""
+    if not download_path.exists():
+        return
+
+    files = list(download_path.glob('*'))
+    if files:
+        print(f"\n⚠ Found {len(files)} orphaned files from previous run")
+        for file_path in files:
+            try:
+                file_path.unlink()
+                print(f"  🗑 Deleted: {file_path.name}")
+            except Exception as e:
+                print(f"  ⚠ Could not delete {file_path.name}: {e}")
+
+
+def get_file_info(message):
+    """Extract file information from message."""
+    if not message.media:
+        return None
+
+    file_info = {
+        "message_id": message.id,
+        "file_name": None,
+        "file_size": 0,
+        "media_type": None
+    }
+
+    # Photo
+    if hasattr(message.media, 'photo'):
+        file_info["media_type"] = "photo"
+        file_info["file_name"] = f"photo_{message.id}.jpg"
+        if hasattr(message.media.photo, 'sizes'):
+            sizes = [getattr(s, 'size', 0) for s in message.media.photo.sizes]
+            file_info["file_size"] = max(sizes) if sizes else 0
+
+    # Document (video, file, audio, etc.)
+    elif hasattr(message.media, 'document'):
+        doc = message.media.document
+        file_info["media_type"] = "document"
+        file_info["file_size"] = doc.size
+
+        # Try to get filename from attributes
+        for attr in doc.attributes:
+            if isinstance(attr, DocumentAttributeFilename):
+                file_info["file_name"] = sanitize_filename(attr.file_name)
+                break
+
+        if not file_info["file_name"]:
+            # Generate safe default name
+            mime_type = doc.mime_type if hasattr(doc, 'mime_type') else ''
+            ext = mime_type.split('/')[-1] if '/' in mime_type else ''
+            file_info["file_name"] = f"file_{message.id}.{ext}" if ext else f"file_{message.id}"
+
+    else:
+        return None
+
+    # Ensure filename is sanitized
+    if file_info["file_name"]:
+        file_info["file_name"] = sanitize_filename(file_info["file_name"])
+
+    return file_info
+
 
 async def get_channel(client, channel_id):
     """Find channel by ID."""
@@ -91,9 +185,17 @@ async def get_channel(client, channel_id):
         return await client.get_entity(channel_id)
     return None
 
-async def download_file(client, message, download_path):
+async def download_file(client, message, download_path, file_info):
     """Download a file with progress."""
-    file_path = download_path / f"temp_{message.id}.file"
+    base_name = file_info["file_name"]
+    file_path = download_path / base_name
+
+    # Handle duplicate filenames
+    counter = 1
+    while file_path.exists():
+        name, ext = os.path.splitext(base_name)
+        file_path = download_path / f"{name}_{counter}{ext}"
+        counter += 1
 
     start_time = datetime.now()
     last_update = [start_time]
@@ -108,11 +210,29 @@ async def download_file(client, message, download_path):
             last_update[0] = now
 
     try:
+        print(f"  ⬇ Downloading: {file_path.name}")
+        print(f"    Size: {file_info['file_size'] / (1024*1024):.2f} MB")
+
         await client.download_media(message.media, file=str(file_path), progress_callback=progress)
         print()  # New line
-        return file_path
+
+        # Verify file was downloaded
+        if file_path.exists() and file_path.stat().st_size > 0:
+            return file_path
+        else:
+            print(f"  ✗ Download failed - file not found or empty")
+            if file_path.exists():
+                file_path.unlink()
+            return None
+
     except Exception as e:
         print(f"\n✗ Download error: {e}")
+        # Clean up partial download
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except:
+                pass
         return None
 
 async def upload_file(client, file_path, caption, dest_entity):
@@ -166,6 +286,9 @@ async def main():
     download_path = Path(config.get('download_path', './temp_downloads'))
     download_path.mkdir(parents=True, exist_ok=True)
 
+    # Clean up orphaned files from previous runs
+    cleanup_orphaned_files(download_path)
+
     # Initialize progress tracker
     progress = ProgressTracker()
 
@@ -203,29 +326,53 @@ async def main():
     # Count messages
     print("Counting messages...")
     copy_text = config.get('copy_text_messages', True)
+    max_size_mb = config.get('max_file_size_mb', 2000)
     messages = []
     skipped = 0
+    too_large = 0
+
     async for msg in client.iter_messages(source_entity):
-        # Include messages with media OR text (if enabled)
-        if msg.media or (copy_text and msg.message):
-            # Skip already processed messages
-            if progress.is_processed(msg.id):
-                skipped += 1
+        # Skip already processed messages
+        if progress.is_processed(msg.id):
+            skipped += 1
+            continue
+
+        # Handle media files
+        if msg.media:
+            file_info = get_file_info(msg)
+            if not file_info:
                 continue
-            messages.append(msg)
+
+            # Check file size limit
+            file_size_mb = file_info["file_size"] / (1024 * 1024)
+            if file_size_mb > max_size_mb:
+                too_large += 1
+                progress.mark_skipped(msg.id)
+                continue
+
+            messages.append((msg, file_info))
+
+        # Handle text messages
+        elif copy_text and msg.message:
+            messages.append((msg, None))
 
     total = len(messages)
     messages.reverse()  # Process from oldest to newest (first message to last)
 
+    # Display count
+    print(f"Found {total} new messages")
     if skipped > 0:
-        print(f"Found {total} new messages ({skipped} already processed)\n")
-    else:
-        print(f"Found {total} messages\n")
+        print(f"  ({skipped} already processed)")
+    if too_large > 0:
+        print(f"  ({too_large} skipped - too large, limit: {max_size_mb} MB)")
+    print()
 
     if total == 0:
         stats = progress.get_stats()
         print("✓ All messages already transferred!")
         print(f"\nStats: {stats['processed']} messages, {stats['total_size_mb']} MB total")
+        if stats.get('skipped', 0) > 0:
+            print(f"⊘ Skipped: {stats['skipped']} messages")
         await client.disconnect()
         return
 
@@ -244,11 +391,11 @@ async def main():
     while next_idx < total or download_task is not None:
         # Start processing next message if not currently downloading
         if download_task is None and next_idx < total:
-            msg = messages[next_idx]
+            msg, file_info = messages[next_idx]
             next_idx += 1
 
             # Check if it's a text-only message
-            if not msg.media and msg.message:
+            if file_info is None:
                 # Text message - process immediately (no download needed)
                 print(f"\n[{next_idx}/{total}] Text message")
                 success = await copy_text_message(client, msg, dest_entity)
@@ -263,10 +410,11 @@ async def main():
                 continue
 
             # Media file - start download
-            file_size = msg.file.size if msg.file else 0
-            print(f"\n[{next_idx}/{total}] Media file (Size: {file_size/(1024*1024):.2f} MB)")
-            download_task = asyncio.create_task(download_file(client, msg, download_path))
+            file_size_mb = file_info["file_size"] / (1024*1024)
+            print(f"\n[{next_idx}/{total}] {file_info['file_name']} ({file_size_mb:.2f} MB)")
+            download_task = asyncio.create_task(download_file(client, msg, download_path, file_info))
             current_msg = msg
+            current_file_info = file_info
 
         # Wait for download to complete
         if download_task:
@@ -279,14 +427,15 @@ async def main():
 
                 # Start next download in parallel with upload (only if next is media)
                 if next_idx < total:
-                    next_msg = messages[next_idx]
+                    next_msg, next_file_info = messages[next_idx]
                     # Only start parallel download if next message has media
-                    if next_msg.media:
+                    if next_file_info is not None:
                         next_idx += 1
-                        file_size = next_msg.file.size if next_msg.file else 0
+                        file_size_mb = next_file_info["file_size"] / (1024*1024)
                         print(f"\n[{next_idx}/{total}] Downloading next while uploading current...")
-                        download_task = asyncio.create_task(download_file(client, next_msg, download_path))
+                        download_task = asyncio.create_task(download_file(client, next_msg, download_path, next_file_info))
                         current_msg_temp = next_msg
+                        current_file_info_temp = next_file_info
 
                 # Upload current file
                 success = await upload_file(client, file_path, caption, dest_entity)
@@ -300,7 +449,7 @@ async def main():
 
                 if success:
                     # Mark as processed
-                    file_size_mb = current_msg.file.size / (1024*1024) if current_msg.file else 0
+                    file_size_mb = current_file_info["file_size"] / (1024*1024)
                     progress.mark_processed(current_msg.id, file_size_mb)
                     processed += 1
                     print(f"  ✓ Complete ({processed}/{total})")
@@ -311,6 +460,7 @@ async def main():
 
                 if download_task:
                     current_msg = current_msg_temp
+                    current_file_info = current_file_info_temp
             else:
                 # Mark as failed if download failed
                 progress.mark_failed(current_msg.id)
@@ -330,6 +480,8 @@ async def main():
     print(f"\nOverall progress:")
     print(f"  ✓ Total processed: {stats['processed']} messages")
     print(f"  ✗ Total failed: {stats['failed']} messages")
+    if stats.get('skipped', 0) > 0:
+        print(f"  ⊘ Total skipped: {stats['skipped']} messages (too large)")
     print(f"  📦 Total size: {stats['total_size_mb']} MB")
     print()
 
