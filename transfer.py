@@ -235,7 +235,10 @@ class Config:
         print("Channel Selection")
         print("-"*60)
 
-        channel_selection = asyncio.run(self._interactive_setup_async(api_id, api_hash, login_method, phone))
+        # Run async channel selection
+        channel_selection = asyncio.run(
+            self._interactive_setup_async(api_id, api_hash, login_method, phone)
+        )
 
         if not channel_selection:
             print("\n✗ Setup failed. Please try again.")
@@ -856,21 +859,21 @@ class TelegramTransfer:
                 print("\n✓ Disconnected from Telegram\n")
 
 
-async def main():
+async def main(config: Config):
     """Main entry point."""
-    print("\n╔════════════════════════════════════════════════════════════╗")
-    print("║    TELEGRAM CHANNEL MEDIA TRANSFER TOOL                    ║")
-    print("║    Low Storage VPS Optimized                               ║")
-    print("╚════════════════════════════════════════════════════════════╝")
-
-    # Load configuration
-    config = Config()
-
     # Create and run transfer
     transfer = TelegramTransfer(config)
     await transfer.run()
 
 
 if __name__ == "__main__":
+    print("\n╔════════════════════════════════════════════════════════════╗")
+    print("║    TELEGRAM CHANNEL MEDIA TRANSFER TOOL                    ║")
+    print("║    Low Storage VPS Optimized                               ║")
+    print("╚════════════════════════════════════════════════════════════╝")
+
+    # Load configuration (before entering async context)
+    config = Config()
+
     # Run async main
-    asyncio.run(main())
+    asyncio.run(main(config))
