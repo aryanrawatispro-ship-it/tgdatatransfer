@@ -604,10 +604,21 @@ class TelegramTransfer:
                 # This is a numeric ID - iterate dialogs to populate cache
                 print(f"Looking up private channel {channel_id}...")
                 target_id = int(channel_id)
+
+                # Telegram stores channel IDs without the -100 prefix
+                # If the ID starts with -100, we need to check both formats
+                if str(target_id).startswith('-100'):
+                    # Remove the -100 prefix to get the actual stored ID
+                    target_id_without_prefix = int(str(target_id)[4:])  # Remove '-100' prefix
+                else:
+                    target_id_without_prefix = target_id
+
                 async for dialog in self.client.iter_dialogs():
-                    if dialog.entity.id == target_id:
+                    # Check both with and without -100 prefix
+                    if dialog.entity.id == target_id or dialog.entity.id == target_id_without_prefix:
                         print(f"✓ Found channel: {dialog.title}")
                         return dialog.entity
+
                 # Not found in dialogs
                 print(f"✗ Channel {channel_id} not found in your dialogs")
                 print("  Make sure you're a member of this channel/group.")
